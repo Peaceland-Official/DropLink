@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DropLink</title>
+<script src="https://cdn.jsdelivr.net/npm/tus-js-client@4.3.1/dist/tus.min.js"></script>
+<style>
+:root{--bg:#0b1020;--card:#121a2f;--text:#f7f9ff;--muted:#aab5d1;--line:#263250;--accent:#7c9cff}
+*{box-sizing:border-box} body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at top,#172447 0,#0b1020 45%);color:var(--text);min-height:100vh}
+.wrap{max-width:760px;margin:auto;padding:48px 20px} .brand{font-size:22px;font-weight:800;letter-spacing:-.5px;margin-bottom:28px}
+.card{background:rgba(18,26,47,.94);border:1px solid var(--line);border-radius:24px;padding:28px;box-shadow:0 24px 70px #0005}
+h1{font-size:34px;line-height:1.05;margin:0 0 10px} p{color:var(--muted);line-height:1.55}
+.drop{margin:26px 0;border:2px dashed #3b4c77;border-radius:20px;padding:42px 18px;text-align:center;cursor:pointer;transition:.2s}
+.drop.drag{border-color:var(--accent);background:#7c9cff12} input[type=file]{display:none}
+button,.btn{border:0;border-radius:13px;padding:13px 17px;font:inherit;font-weight:750;cursor:pointer;background:var(--accent);color:#081025}
+select{width:100%;padding:13px;border-radius:12px;background:#0c1429;color:var(--text);border:1px solid var(--line);font:inherit}
+.row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end} label{display:block;color:var(--muted);font-size:13px;margin-bottom:7px}
+.progress{height:10px;background:#0a1122;border-radius:99px;overflow:hidden;margin-top:18px;display:none} .bar{height:100%;width:0;background:var(--accent)}
+.status{margin-top:12px;color:var(--muted);font-size:14px} .result{display:none;margin-top:22px;padding-top:22px;border-top:1px solid var(--line)}
+.linkbox{display:grid;grid-template-columns:1fr auto;gap:9px} .linkbox input{min-width:0;background:#0a1122;color:#dce5ff;border:1px solid var(--line);border-radius:12px;padding:13px}
+.viewer{display:none} .mediawrap{position:relative;background:#05070c;border-radius:18px;overflow:hidden;min-height:220px;display:grid;place-items:center}
+.mediawrap video,.mediawrap img{max-width:100%;max-height:72vh;display:block} .download{position:absolute;right:14px;top:14px;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:#ffffffee;color:#101522;text-decoration:none;font-size:22px}
+.small{font-size:12px} .expired{text-align:center;padding:50px 10px}
+@media(max-width:560px){.row{grid-template-columns:1fr} h1{font-size:29px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="brand">DropLink</div>
+
+<section id="uploader" class="card">
+<h1>Send a photo or video.</h1>
+<p>No account. No public gallery. Upload it, copy the private-looking random link, and send it anywhere.</p>
+<div id="drop" class="drop">
+<input id="file" type="file" accept="image/*,video/*">
+<strong id="pickText">Choose a photo or video</strong>
+<p class="small">or drag and drop it here</p>
+</div>
+<div class="row">
+<div><label for="expiry">Link expiry</label>
+<select id="expiry">
+<option value="1">1 hour</option>
+<option value="24" selected>24 hours</option>
+<option value="72">3 days</option>
+<option value="168">7 days</option>
+</select></div>
+<button id="upload" disabled>Upload</button>
+</div>
+<div id="progress" class="progress"><div id="bar" class="bar"></div></div>
+<div id="status" class="status"></div>
+<div id="result" class="result">
+<label>Your share link</label>
+<div class="linkbox"><input id="share" readonly><button id="copy">Copy link</button></div>
+<p class="small">Refreshing this upload page clears the local history. The uploaded file remains available through its link until expiry.</p>
+</div>
+</section>
+
+<section id="viewer" class="card viewer">
+<div id="viewBody"></div>
+</section>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://ockdjdfacmkiwsyyikxp.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_6gg8s2fE9C-6E2rWz_oXdw_82EfpZME';
+const BUCKET = "uploads";
+const $ = s => document.querySelector(s);
+let chosen = null;
+
+function safeName(name) {
+  const ext = (name.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,10) || 'bin';
+  return ext;
+}
+function randomId() {
+  const b = new Uint8Array(18); crypto.getRandomValues(b);
+  return Array.from(b, x => x.toString(16).padStart(2,'0')).join('');
+}
+function encodePayload(o) {
+  return btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function decodePayload(s) {
+  try { return JSON.parse(decodeURIComponent(escape(atob(s.replace(/-/g,'+').replace(/_/g,'/'))))); } catch(e) { return null; }
+}
+
+const drop = $('#drop'), file = $('#file');
+drop.onclick = () => file.click();
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, x => {x.preventDefault();drop.classList.add('drag')}));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, x => {x.preventDefault();drop.classList.remove('drag')}));
+drop.addEventListener('drop', e => choose(e.dataTransfer.files[0]));
+file.onchange = () => choose(file.files[0]);
+
+function choose(f) {
+  if (!f) return;
+  if (!(f.type.startsWith('image/') || f.type.startsWith('video/'))) return alert('Please choose a photo or video.');
+  chosen = f; $('#pickText').textContent = f.name; $('#upload').disabled = false;
+  $('#status').textContent = `${(f.size/1024/1024).toFixed(1)} MB selected`;
+}
+
+$('#upload').onclick = () => {
+  if (!chosen) return;
+  const hours = Number($('#expiry').value);
+  const expires = Date.now() + hours*3600000;
+  const objectName = `${randomId()}.${safeName(chosen.name)}`;
+  $('#upload').disabled = true; $('#progress').style.display='block'; $('#result').style.display='none';
+  $('#status').textContent='Starting resumable upload…';
+
+  const upload = new tus.Upload(chosen, {
+    endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`,
+    retryDelays: [0,1000,3000,5000,10000],
+    headers: { authorization:`Bearer ${SUPABASE_KEY}`, apikey:SUPABASE_KEY, 'x-upsert':'false' },
+    metadata: { bucketName:BUCKET, objectName, contentType:chosen.type, cacheControl:'3600' },
+    chunkSize: 6 * 1024 * 1024,
+    removeFingerprintOnSuccess: true,
+    onError: err => { $('#status').textContent='Upload failed: '+err; $('#upload').disabled=false; },
+    onProgress: (sent,total) => {
+      const pct = total ? sent/total*100 : 0; $('#bar').style.width=pct.toFixed(1)+'%';
+      $('#status').textContent=`Uploading… ${pct.toFixed(0)}%`;
+    },
+    onSuccess: () => {
+      const payload = encodePayload({p:objectName,e:expires,t:chosen.type,n:chosen.name});
+      const link = `${location.origin}${location.pathname}#v=${payload}`;
+      $('#share').value=link; $('#result').style.display='block'; $('#status').textContent='Upload complete.';
+      $('#upload').disabled=false;
+    }
+  });
+  upload.findPreviousUploads().then(prev => { if(prev.length) upload.resumeFromPreviousUpload(prev[0]); upload.start(); });
+};
+
+$('#copy').onclick = async () => {
+  await navigator.clipboard.writeText($('#share').value);
+  $('#copy').textContent='Copied!';
+  setTimeout(()=>$('#copy').textContent='Copy link',1300);
+};
+
+function publicUrl(path) {
+  return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${encodeURIComponent(path)}`;
+}
+function renderViewer() {
+  if (!location.hash.startsWith('#v=')) return;
+  $('#uploader').style.display='none'; $('#viewer').style.display='block';
+  const data = decodePayload(location.hash.slice(3));
+  if (!data || !data.p || !data.e) return expired('Invalid link');
+  if (Date.now() > data.e) return expired('This link has expired');
+  const url = publicUrl(data.p);
+  const media = String(data.t||'').startsWith('video/')
+    ? `<video controls autoplay playsinline src="${url}"></video>`
+    : `<img src="${url}" alt="">`;
+  $('#viewBody').innerHTML = `<div class="mediawrap">${media}<a class="download" href="${url}" download="${(data.n||'download').replace(/"/g,'')}"
+    title="Download">↓</a></div><p class="small">Available until ${new Date(data.e).toLocaleString()}</p>`;
+}
+function expired(msg) { $('#viewBody').innerHTML=`<div class="expired"><h1>${msg}</h1><p>The file is no longer available from this link.</p></div>`; }
+renderViewer();
+window.addEventListener('hashchange',()=>location.reload());
+</script>
+</body>
+</html>
